@@ -198,7 +198,9 @@ _G.hopToLowServer = function(maxPlayers)
 end
 
 -- =====================
--- DIALOGUE (macro click using AbsolutePosition)
+-- DIALOGUE
+-- Uses AbsolutePosition for macro-style clicking (mousemoveabs + mouse1click)
+-- DocksDelivery is #12 in list so we scroll to bottom before clicking it
 -- =====================
 local talkRemote = RS.Events.Talk
 local lastTalkText = ""
@@ -234,7 +236,8 @@ _G.waitForTalk = function(containsText, timeoutSecs)
     return false
 end
 
--- Click dialogue button by index using AbsolutePosition (macro style)
+-- Click dialogue button by index (1 = top button)
+-- Waits for Options frame to be open before clicking
 _G.macroClickDialogue = function(buttonIndex, timeoutSecs)
     local pgui = player.PlayerGui
     local deadline = tick() + (timeoutSecs or 6)
@@ -242,31 +245,24 @@ _G.macroClickDialogue = function(buttonIndex, timeoutSecs)
         local dlg = pgui:FindFirstChild("Dialogue")
         if dlg and dlg.Enabled then
             local ok, scroll = pcall(function() return dlg.MainFrame.Options.Scroll end)
-            if ok and scroll then
-                -- wait for options frame to be open
-                local options = dlg.MainFrame.Options
-                if options.AbsoluteSize.Y > 10 then
-                    -- collect buttons sorted by Y position
-                    local buttons = {}
-                    for _, item in ipairs(scroll:GetChildren()) do
-                        if not item:IsA("UIListLayout") then
-                            table.insert(buttons, item)
-                        end
+            if ok and scroll and dlg.MainFrame.Options.AbsoluteSize.Y > 10 then
+                local buttons = {}
+                for _, item in ipairs(scroll:GetChildren()) do
+                    if not item:IsA("UIListLayout") then
+                        table.insert(buttons, item)
                     end
-                    table.sort(buttons, function(a,b)
-                        return a.AbsolutePosition.Y < b.AbsolutePosition.Y
-                    end)
-                    local target = buttons[buttonIndex]
-                    if target then
-                        local absPos = target.AbsolutePosition
-                        local absSize = target.AbsoluteSize
-                        local clickX = absPos.X + absSize.X / 2
-                        local clickY = absPos.Y + absSize.Y / 2
-                        mousemoveabs(clickX, clickY)
-                        task.wait(0.05)
-                        mouse1click()
-                        return true
-                    end
+                end
+                table.sort(buttons, function(a,b)
+                    return a.AbsolutePosition.Y < b.AbsolutePosition.Y
+                end)
+                local target = buttons[buttonIndex]
+                if target then
+                    local absPos = target.AbsolutePosition
+                    local absSize = target.AbsoluteSize
+                    mousemoveabs(absPos.X + absSize.X/2, absPos.Y + absSize.Y/2)
+                    task.wait(0.05)
+                    mouse1click()
+                    return true
                 end
             end
         end
@@ -275,15 +271,21 @@ _G.macroClickDialogue = function(buttonIndex, timeoutSecs)
     return false
 end
 
--- Also keep text search version as fallback
-_G.clickDialogueByText = function(searchText, timeoutSecs)
+-- Click dialogue button by text search
+-- scrollToBottom: set true when target is near bottom of list (e.g. DocksDelivery = #12)
+_G.clickDialogueByText = function(searchText, scrollToBottom, timeoutSecs)
     local pgui = player.PlayerGui
-    local deadline = tick() + (timeoutSecs or 4)
+    local deadline = tick() + (timeoutSecs or 6)
     while tick() < deadline and _G.farmRunning do
         local dlg = pgui:FindFirstChild("Dialogue")
         if dlg and dlg.Enabled then
             local ok, scroll = pcall(function() return dlg.MainFrame.Options.Scroll end)
             if ok and scroll and dlg.MainFrame.Options.AbsoluteSize.Y > 10 then
+                -- jump scroll to bottom so items near end of list are visible
+                if scrollToBottom then
+                    scroll.CanvasPosition = Vector2.new(0, scroll.AbsoluteCanvasSize.Y)
+                    task.wait(0.05)
+                end
                 for _, item in ipairs(scroll:GetChildren()) do
                     if not item:IsA("UIListLayout") then
                         local allText = ""
@@ -293,13 +295,16 @@ _G.clickDialogueByText = function(searchText, timeoutSecs)
                             local ok3, t2 = pcall(function() return d.Text end)
                             if ok3 and t2 and t2 ~= "" then allText = allText .. " " .. t2 end
                         end
-                        if searchText == "*" or allText:lower():find(searchText:lower(), 1, true) then
+                        if allText:lower():find(searchText:lower(), 1, true) then
                             local absPos = item.AbsolutePosition
                             local absSize = item.AbsoluteSize
-                            mousemoveabs(absPos.X + absSize.X/2, absPos.Y + absSize.Y/2)
-                            task.wait(0.05)
-                            mouse1click()
-                            return true, allText
+                            -- only click if actually visible on screen
+                            if absPos.Y > 0 and absPos.Y < workspace.CurrentCamera.ViewportSize.Y then
+                                mousemoveabs(absPos.X + absSize.X/2, absPos.Y + absSize.Y/2)
+                                task.wait(0.05)
+                                mouse1click()
+                                return true
+                            end
                         end
                     end
                 end
@@ -352,6 +357,14 @@ end
 
 -- =====================
 -- FARM LOOP
+-- Flow:
+-- 1. Talk to Office Contractor
+-- 2. Click "Show me the available jobs." (button 1)
+-- 3. Scroll to bottom, click "Docks Delivery" (it's #12 in list)
+-- 4. Go to docks, find Twinhook Pirate, talk to them
+-- 5. Find shipment prompt, pick it up
+-- 6. Return to Office Contractor
+-- 7. Click "I'm here to turn this in." (button 3)
 -- =====================
 _G.runDocksDeliveryFarm = function()
     local teleportTo = _G.teleportTo
@@ -363,46 +376,54 @@ _G.runDocksDeliveryFarm = function()
     local clickByText = _G.clickDialogueByText
     local findDocksNPC = _G.findDocksNPC
     local findShipment = _G.findShipmentPrompt
-    local RS = _G.RS
 
     while _G.farmRunning do
 
+        -- STEP 1: Go to Office Contractor
         setStatus("Going to Office Contractor...")
         teleportTo(CFrame.new(_G.OFFICE_CONTRACTOR_POS + Vector3.new(0,0,3)))
         waitSec(1.5); if not _G.farmRunning then break end
 
+        -- STEP 2: Talk to Office Contractor
         setStatus("Talking to Office Contractor...")
         local npc = workspace.NPCS:FindFirstChild("Office Contractor")
         if not npc then setStatus("NPC not found!"); waitSec(3); break end
         local prompt = npc:FindFirstChild("InteractPrompt", true)
         if prompt then firePrompt(prompt) end
 
+        -- Wait for greeting to finish animating
         setStatus("Waiting for dialogue...")
         local gotGreeting = waitForTalk("jobs here", 6)
         if not gotGreeting then setStatus("No dialogue, retrying..."); waitSec(2) end
         if not _G.farmRunning then break end
 
-        -- Click "Show me the available jobs." = button 1
+        -- STEP 3: Click "Show me the available jobs." = button 1
         setStatus("Clicking 'Show me the available jobs.'...")
         local ok1 = macroClick(1, 4)
-        if not ok1 then clickByText("available jobs", 3) end
+        if not ok1 then
+            -- fallback text search
+            clickByText("available jobs", false, 3)
+        end
         if not _G.farmRunning then break end
 
-        -- Wait for jobs list then click Docks Delivery
+        -- STEP 4: Wait for jobs list Talk, scroll to bottom, click Docks Delivery
         setStatus("Waiting for jobs list...")
         local gotJobs = waitForTalk("jobs currently available", 7)
         if gotJobs then
             setStatus("Clicking 'Docks Delivery'...")
-            -- Try by text first, fallback to index
-            local ok2 = clickByText("docks", 4)
-            if not ok2 then ok2 = macroClick(1, 3) end
-            if not ok2 then setStatus("Docks not found, restarting..."); waitSec(3) end
+            -- DocksDelivery is #12 (last) so scroll to bottom first
+            local ok2 = clickByText("docks delivery", true, 5)
+            if not ok2 then
+                setStatus("Docks not found, restarting...")
+                waitSec(3)
+            end
         else
-            setStatus("Jobs list not received, restarting..."); waitSec(3)
+            setStatus("Jobs list not received, restarting...")
+            waitSec(3)
         end
         if not _G.farmRunning then break end
 
-        -- Wait for contract confirmation
+        -- STEP 5: Wait for contract confirmation
         setStatus("Waiting for contract...")
         local contractConfirmed = false
         local contractConn = RS.Events.CreateContract.OnClientEvent:Connect(function(name)
@@ -411,26 +432,33 @@ _G.runDocksDeliveryFarm = function()
         local t = tick()
         while tick()-t < 5 and not contractConfirmed and _G.farmRunning do task.wait(0.1) end
         contractConn:Disconnect()
-        if contractConfirmed then setStatus("DocksDelivery confirmed ✓")
-        else setStatus("Unconfirmed, continuing...") end
+        if contractConfirmed then
+            setStatus("DocksDelivery confirmed ✓")
+        else
+            setStatus("Unconfirmed, continuing...")
+        end
         waitSec(1); if not _G.farmRunning then break end
 
-        -- Go to docks
+        -- STEP 6: Go to docks, find Twinhook Pirate
         setStatus("Going to docks...")
         teleportTo(CFrame.new(_G.DOCKS_CENTER))
         waitSec(1.5); if not _G.farmRunning then break end
 
-        -- Find Twinhook Pirate
         setStatus("Waiting for Twinhook Pirate...")
         local docksNPC, docksPrompt, docksPos = findDocksNPC()
         local dAttempts = 0
         while not docksNPC and dAttempts < 12 and _G.farmRunning do
-            task.wait(1); docksNPC, docksPrompt, docksPos = findDocksNPC(); dAttempts = dAttempts + 1
+            task.wait(1)
+            docksNPC, docksPrompt, docksPos = findDocksNPC()
+            dAttempts = dAttempts + 1
         end
+
         if docksNPC and docksPrompt and docksPos then
             setStatus("Talking to Twinhook Pirate...")
             teleportTo(CFrame.new(docksPos + Vector3.new(0,0,3)))
-            waitSec(0.8); firePrompt(docksPrompt)
+            waitSec(0.8)
+            firePrompt(docksPrompt)
+            -- wait for pirate dialogue then click first option
             local gotPirate = waitForTalk("shipment", 5)
             if gotPirate then macroClick(1, 3) end
             waitSec(1)
@@ -439,42 +467,55 @@ _G.runDocksDeliveryFarm = function()
         end
         if not _G.farmRunning then break end
 
-        -- Pick up shipment
+        -- STEP 7: Find and pick up shipment
         setStatus("Looking for shipment...")
         local shipPrompt, shipPos = findShipment()
         local sAttempts = 0
         while not shipPrompt and sAttempts < 8 and _G.farmRunning do
             teleportTo(CFrame.new(_G.DOCKS_CARGO_POSITIONS[(sAttempts % #_G.DOCKS_CARGO_POSITIONS)+1]))
-            waitSec(0.8); shipPrompt, shipPos = findShipment(); sAttempts = sAttempts + 1
+            waitSec(0.8)
+            shipPrompt, shipPos = findShipment()
+            sAttempts = sAttempts + 1
         end
+
         if shipPrompt and shipPos then
             setStatus("Picking up shipment...")
             teleportTo(CFrame.new(shipPos + Vector3.new(0,0,2)))
-            waitSec(0.8); firePrompt(shipPrompt); waitSec(1.5)
+            waitSec(0.8)
+            firePrompt(shipPrompt)
+            waitSec(1.5)
         else
-            setStatus("Shipment not found, restarting..."); waitSec(3)
+            setStatus("Shipment not found, restarting...")
+            waitSec(3)
         end
         if not _G.farmRunning then break end
 
-        -- Return and turn in
+        -- STEP 8: Return to Office Contractor and turn in
         setStatus("Returning to turn in...")
         teleportTo(CFrame.new(_G.OFFICE_CONTRACTOR_POS + Vector3.new(0,0,3)))
         waitSec(1.5); if not _G.farmRunning then break end
 
         setStatus("Talking to turn in...")
         if prompt then firePrompt(prompt) end
+
+        -- Wait for greeting then click "I'm here to turn this in." = button 3
         local gotGreeting2 = waitForTalk("jobs here", 6)
         if gotGreeting2 then
             setStatus("Clicking 'I'm here to turn this in.'...")
-            -- "turn this in" is button 3
-            local ok3 = clickByText("turn this in", 4)
-            if not ok3 then macroClick(3, 3) end
+            local ok3 = macroClick(3, 4)
+            if not ok3 then
+                clickByText("turn this in", false, 3)
+            end
         end
-        waitSec(2); setStatus("Contract complete ✓")
+
+        waitSec(2)
+        setStatus("Contract complete ✓")
         if not _G.farmRunning then break end
 
-        setStatus("Cooldown..."); waitSec(3)
+        setStatus("Cooldown...")
+        waitSec(3)
     end
+
     setStatus("Stopped")
 end
 
