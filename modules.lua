@@ -204,9 +204,9 @@ end
 -- Confirmed structure:
 --   Scroll > Frame "Option" > TextButton "OptionButton" (Selectable: true)
 --
--- GuiService.SelectedObject highlights it (blue box confirmed working).
--- To actually confirm the selection we simulate gamepad ButtonA press,
--- which is the Roblox UI navigation confirm input.
+-- True macro approach: move mouse to the button's screen center and click.
+-- mousemoveabs(x, y) moves the OS cursor, mouse1click() fires a real click.
+-- This bypasses all Roblox input filtering completely.
 -- buttonIndex is 0-based: 0 = first option, 1 = second, etc.
 -- =====================
 local talkRemote = RS.Events.Talk
@@ -243,7 +243,7 @@ _G.waitForTalk = function(containsText, timeoutSecs)
     return false
 end
 
--- Wait for the Options panel to tween open and be populated
+-- Wait for Options panel to tween open and have buttons
 local function waitForOptions(timeoutSecs)
     local pgui = player.PlayerGui
     local deadline = tick() + (timeoutSecs or 8)
@@ -293,29 +293,15 @@ local function getSortedOptionButtons(scroll)
     return buttons
 end
 
--- Simulate a gamepad ButtonA press to confirm the currently selected GUI object
-local function pressButtonA()
-    -- ButtonA is the standard Roblox UI navigation confirm
-    -- We fire both Begin and End to simulate a full press
-    local inputBegin = {
-        KeyCode = Enum.KeyCode.ButtonA,
-        UserInputType = Enum.UserInputType.Gamepad1,
-        UserInputState = Enum.UserInputState.Begin,
-    }
-    local inputEnd = {
-        KeyCode = Enum.KeyCode.ButtonA,
-        UserInputType = Enum.UserInputType.Gamepad1,
-        UserInputState = Enum.UserInputState.End,
-    }
-    -- Use simulateinput if available (Synapse X / Velocity)
-    local ok = false
-    if not ok then pcall(function() simulateinput(inputBegin, false); ok = true end) end
-    if not ok then pcall(function() UIS:simulateInput(inputBegin, false); ok = true end) end
+-- Move mouse to the center of a GuiObject and click it
+local function mouseClickGui(guiObj)
+    local pos = guiObj.AbsolutePosition
+    local size = guiObj.AbsoluteSize
+    local cx = math.floor(pos.X + size.X / 2)
+    local cy = math.floor(pos.Y + size.Y / 2)
+    mousemoveabs(cx, cy)
     task.wait(0.05)
-    if not ok then return false end
-    pcall(function() simulateinput(inputEnd, false) end)
-    pcall(function() UIS:simulateInput(inputEnd, false) end)
-    return ok
+    mouse1click()
 end
 
 -- navDialogue(0) = 1st option, navDialogue(1) = 2nd option, etc.
@@ -340,27 +326,17 @@ _G.navDialogue = function(buttonIndex, timeoutSecs)
 
     local target = buttons[idx]
 
-    -- Scroll canvas so button is visible
+    -- Scroll canvas so button is on screen
     pcall(function()
         local relY = target.AbsolutePosition.Y - scroll.AbsolutePosition.Y
         scroll.CanvasPosition = Vector2.new(0, math.max(0, relY - 20))
     end)
     task.wait(0.05)
 
-    -- Step 1: select the button (shows blue highlight)
-    GuiService.SelectedObject = target
-    task.wait(0.1)
-
-    -- Step 2: confirm with ButtonA (gamepad UI navigation confirm)
-    local pressed = pressButtonA()
-
-    -- Step 3: if ButtonA didn't work, fall back to Activated:Fire()
-    if not pressed then
-        target.Activated:Fire()
-    end
-
+    -- Move mouse to button center and click
+    mouseClickGui(target)
     task.wait(0.15)
-    GuiService.SelectedObject = nil
+
     return true
 end
 
