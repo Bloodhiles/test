@@ -204,12 +204,9 @@ end
 -- Confirmed structure:
 --   Scroll > Frame "Option" > TextButton "OptionButton" (Selectable: true)
 --
--- Pure Roblox UI navigation approach:
---   1. GuiService.GuiNavigationEnabled = true
---   2. GuiService.SelectedObject = OptionButton  (shows blue highlight)
---   3. Simulate DPad down presses to reach the target button if needed
---   4. Confirm with Return/Enter keypress via UIS keypress simulation
---      (Enter triggers the currently selected GuiButton in Roblox's nav system)
+-- Approach: GuiService navigation highlight + firesignal on every connection
+-- firesignal fires ALL connections on a signal directly, bypassing input filtering.
+-- Tries MouseButton1Click first, then MouseButton1Down, then Activated as fallbacks.
 -- buttonIndex is 0-based: 0 = first option, 1 = second, etc.
 -- =====================
 local talkRemote = RS.Events.Talk
@@ -296,6 +293,29 @@ local function getSortedOptionButtons(scroll)
     return buttons
 end
 
+-- Fire all connections on a button's signals using firesignal (Velocity/executor function)
+-- Tries each signal in order until one has connections
+local function fireButtonSignals(btn)
+    local signals = {
+        btn.MouseButton1Click,
+        btn.MouseButton1Down,
+        btn.Activated,
+    }
+    for _, sig in ipairs(signals) do
+        local conns = {}
+        pcall(function() conns = getconnections(sig) end)
+        if #conns > 0 then
+            pcall(function() firesignal(sig) end)
+            return true
+        end
+    end
+    -- fallback: try firesignal on all anyway
+    for _, sig in ipairs(signals) do
+        pcall(function() firesignal(sig) end)
+    end
+    return false
+end
+
 -- navDialogue(0) = 1st option, navDialogue(1) = 2nd option, etc.
 _G.navDialogue = function(buttonIndex, timeoutSecs)
     local scroll = waitForOptions(timeoutSecs or 8)
@@ -325,24 +345,15 @@ _G.navDialogue = function(buttonIndex, timeoutSecs)
     end)
     task.wait(0.05)
 
-    -- Enable navigation and select the target button (shows blue highlight)
+    -- Highlight via navigation (shows blue box — purely visual)
     GuiService.GuiNavigationEnabled = true
     GuiService.SelectedObject = target
     task.wait(0.1)
 
-    -- Confirm selection via Return key — Roblox UI nav fires the selected button on Return/Enter
-    local fakeReturn = {
-        KeyCode = Enum.KeyCode.Return,
-        UserInputType = Enum.UserInputType.Keyboard,
-        UserInputState = Enum.UserInputState.Begin,
-    }
-    UIS.InputBegan:Fire(fakeReturn, false)
-    task.wait(0.05)
-    fakeReturn.UserInputState = Enum.UserInputState.End
-    UIS.InputBegan:Fire(fakeReturn, false)
+    -- Fire all connections on the button's click signals
+    fireButtonSignals(target)
     task.wait(0.15)
 
-    -- Clean up
     GuiService.SelectedObject = nil
     GuiService.GuiNavigationEnabled = false
     return true
@@ -406,12 +417,10 @@ _G.runDocksDeliveryFarm = function()
 
     while _G.farmRunning do
 
-        -- STEP 1: Go to Office Contractor
         setStatus("Going to Office Contractor...")
         teleportTo(CFrame.new(_G.OFFICE_CONTRACTOR_POS + Vector3.new(0,0,3)))
         waitSec(1.5); if not _G.farmRunning then break end
 
-        -- STEP 2: Talk to Office Contractor
         setStatus("Talking to Office Contractor...")
         local npc = workspace.NPCS:FindFirstChild("Office Contractor")
         if not npc then setStatus("NPC not found!"); waitSec(3); break end
@@ -423,25 +432,21 @@ _G.runDocksDeliveryFarm = function()
         if not gotGreeting then setStatus("No greeting, retrying..."); waitSec(2) end
         if not _G.farmRunning then break end
 
-        -- STEP 3: Click "Show me the available jobs." = index 0
         setStatus("Clicking 'Show me the available jobs.'...")
         navDialogue(0, 6)
         if not _G.farmRunning then break end
 
-        -- STEP 4: Wait for jobs list, click Docks Delivery
-        -- UPDATE the index below once confirmed in-game (0 = first job in list)
         setStatus("Waiting for jobs list...")
         local gotJobs = waitForTalk("jobs currently available", 7)
         if gotJobs then
             setStatus("Clicking Docks Delivery...")
-            navDialogue(0, 6)  -- <-- UPDATE THIS INDEX
+            navDialogue(0, 6)  -- <-- UPDATE THIS INDEX once confirmed in-game
         else
             setStatus("Jobs list not received, restarting...")
             waitSec(3)
         end
         if not _G.farmRunning then break end
 
-        -- STEP 5: Wait for contract confirmation
         setStatus("Waiting for contract...")
         local contractConfirmed = false
         local contractConn = RS.Events.CreateContract.OnClientEvent:Connect(function(name)
@@ -450,14 +455,9 @@ _G.runDocksDeliveryFarm = function()
         local t = tick()
         while tick()-t < 5 and not contractConfirmed and _G.farmRunning do task.wait(0.1) end
         contractConn:Disconnect()
-        if contractConfirmed then
-            setStatus("DocksDelivery confirmed ✓")
-        else
-            setStatus("Unconfirmed, continuing...")
-        end
+        setStatus(contractConfirmed and "DocksDelivery confirmed ✓" or "Unconfirmed, continuing...")
         waitSec(1); if not _G.farmRunning then break end
 
-        -- STEP 6: Go to docks, find Twinhook Pirate
         setStatus("Going to docks...")
         teleportTo(CFrame.new(_G.DOCKS_CENTER))
         waitSec(1.5); if not _G.farmRunning then break end
@@ -466,16 +466,13 @@ _G.runDocksDeliveryFarm = function()
         local docksNPC, docksPrompt, docksPos = findDocksNPC()
         local dAttempts = 0
         while not docksNPC and dAttempts < 12 and _G.farmRunning do
-            task.wait(1)
-            docksNPC, docksPrompt, docksPos = findDocksNPC()
-            dAttempts = dAttempts + 1
+            task.wait(1); docksNPC, docksPrompt, docksPos = findDocksNPC(); dAttempts += 1
         end
 
         if docksNPC and docksPrompt and docksPos then
             setStatus("Talking to Twinhook Pirate...")
             teleportTo(CFrame.new(docksPos + Vector3.new(0,0,3)))
-            waitSec(0.8)
-            firePrompt(docksPrompt)
+            waitSec(0.8); firePrompt(docksPrompt)
             local gotPirate = waitForTalk("shipment", 5)
             if gotPirate then navDialogue(0, 3) end
             waitSec(1)
@@ -484,46 +481,38 @@ _G.runDocksDeliveryFarm = function()
         end
         if not _G.farmRunning then break end
 
-        -- STEP 7: Find and pick up shipment
         setStatus("Looking for shipment...")
         local shipPrompt, shipPos = findShipment()
         local sAttempts = 0
         while not shipPrompt and sAttempts < 8 and _G.farmRunning do
             teleportTo(CFrame.new(_G.DOCKS_CARGO_POSITIONS[(sAttempts % #_G.DOCKS_CARGO_POSITIONS)+1]))
-            waitSec(0.8)
-            shipPrompt, shipPos = findShipment()
-            sAttempts = sAttempts + 1
+            waitSec(0.8); shipPrompt, shipPos = findShipment(); sAttempts += 1
         end
 
         if shipPrompt and shipPos then
             setStatus("Picking up shipment...")
             teleportTo(CFrame.new(shipPos + Vector3.new(0,0,2)))
-            waitSec(0.8)
-            firePrompt(shipPrompt)
-            waitSec(1.5)
+            waitSec(0.8); firePrompt(shipPrompt); waitSec(1.5)
         else
-            setStatus("Shipment not found, restarting...")
-            waitSec(3)
+            setStatus("Shipment not found, restarting..."); waitSec(3)
         end
         if not _G.farmRunning then break end
 
-        -- STEP 8: Return and turn in
         setStatus("Returning to turn in...")
         teleportTo(CFrame.new(_G.OFFICE_CONTRACTOR_POS + Vector3.new(0,0,3)))
         waitSec(1.5); if not _G.farmRunning then break end
 
         local turnInDone = false
         local turnInAttempts = 0
-
         while not turnInDone and turnInAttempts < 3 and _G.farmRunning do
-            turnInAttempts = turnInAttempts + 1
+            turnInAttempts += 1
             setStatus("Talking to turn in (attempt " .. turnInAttempts .. ")...")
             if prompt then firePrompt(prompt) end
 
             local gotGreeting2 = waitForTalk("jobs here", 6)
             if gotGreeting2 then
                 setStatus("Clicking 'I'm here to turn this in.'...")
-                navDialogue(2, 6)  -- 3rd button
+                navDialogue(2, 6)
             end
 
             local deadline = tick() + 4
@@ -536,9 +525,7 @@ _G.runDocksDeliveryFarm = function()
                     if active then
                         for _, child in ipairs(active:GetChildren()) do
                             local ok, ct = pcall(function() return child.ContractName.Text end)
-                            if ok and ct and ct:lower():find("docks", 1, true) then
-                                found = true; break
-                            end
+                            if ok and ct and ct:lower():find("docks", 1, true) then found = true; break end
                         end
                     end
                 end
@@ -547,17 +534,13 @@ _G.runDocksDeliveryFarm = function()
             end
 
             if not turnInDone and turnInAttempts < 3 then
-                setStatus("Turn-in not confirmed, retrying...")
-                waitSec(1)
+                setStatus("Turn-in not confirmed, retrying..."); waitSec(1)
             end
         end
 
-        if turnInDone then setStatus("Contract complete ✓")
-        else setStatus("Turn-in failed, restarting loop...") end
-
+        setStatus(turnInDone and "Contract complete ✓" or "Turn-in failed, restarting loop...")
         if not _G.farmRunning then break end
-        setStatus("Cooldown...")
-        waitSec(3)
+        setStatus("Cooldown..."); waitSec(3)
     end
 
     setStatus("Stopped")
