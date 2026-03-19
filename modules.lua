@@ -201,17 +201,13 @@ end
 
 -- =====================
 -- DIALOGUE
--- Confirmed structure from in-game inspection:
---   Scroll
---     Frame "Option"              <- NOT selectable, no NextSelectionDown
---       TextLabel  "OptionText"
---       TextButton "OptionButton" <- Selectable: true  ← we target this
---       ImageLabel "Divider"
---       ImageLabel "ImagePreview"
+-- Confirmed structure:
+--   Scroll > Frame "Option" > TextButton "OptionButton" (Selectable: true)
 --
--- Strategy: sort Option frames by Y, grab their OptionButton child,
--- set GuiService.SelectedObject = that button, then fire Activated on it.
--- buttonIndex is 0-based: 0 = first, 1 = second, etc.
+-- GuiService.SelectedObject highlights it (blue box confirmed working).
+-- To actually confirm the selection we simulate gamepad ButtonA press,
+-- which is the Roblox UI navigation confirm input.
+-- buttonIndex is 0-based: 0 = first option, 1 = second, etc.
 -- =====================
 local talkRemote = RS.Events.Talk
 local lastTalkText = ""
@@ -247,7 +243,7 @@ _G.waitForTalk = function(containsText, timeoutSecs)
     return false
 end
 
--- Wait for the Options panel to tween open and have at least one Option frame
+-- Wait for the Options panel to tween open and be populated
 local function waitForOptions(timeoutSecs)
     local pgui = player.PlayerGui
     local deadline = tick() + (timeoutSecs or 8)
@@ -273,7 +269,7 @@ local function waitForOptions(timeoutSecs)
     return nil
 end
 
--- Sort Option frames by screen Y, extract their OptionButton children in order
+-- Sort Option frames by Y, return their OptionButton children in order
 local function getSortedOptionButtons(scroll)
     local frames = {}
     for _, item in ipairs(scroll:GetChildren()) do
@@ -295,6 +291,31 @@ local function getSortedOptionButtons(scroll)
         end
     end
     return buttons
+end
+
+-- Simulate a gamepad ButtonA press to confirm the currently selected GUI object
+local function pressButtonA()
+    -- ButtonA is the standard Roblox UI navigation confirm
+    -- We fire both Begin and End to simulate a full press
+    local inputBegin = {
+        KeyCode = Enum.KeyCode.ButtonA,
+        UserInputType = Enum.UserInputType.Gamepad1,
+        UserInputState = Enum.UserInputState.Begin,
+    }
+    local inputEnd = {
+        KeyCode = Enum.KeyCode.ButtonA,
+        UserInputType = Enum.UserInputType.Gamepad1,
+        UserInputState = Enum.UserInputState.End,
+    }
+    -- Use simulateinput if available (Synapse X / Velocity)
+    local ok = false
+    if not ok then pcall(function() simulateinput(inputBegin, false); ok = true end) end
+    if not ok then pcall(function() UIS:simulateInput(inputBegin, false); ok = true end) end
+    task.wait(0.05)
+    if not ok then return false end
+    pcall(function() simulateinput(inputEnd, false) end)
+    pcall(function() UIS:simulateInput(inputEnd, false) end)
+    return ok
 end
 
 -- navDialogue(0) = 1st option, navDialogue(1) = 2nd option, etc.
@@ -326,13 +347,20 @@ _G.navDialogue = function(buttonIndex, timeoutSecs)
     end)
     task.wait(0.05)
 
-    -- Select the button via GuiService then fire Activated (Roblox UI navigation confirm)
+    -- Step 1: select the button (shows blue highlight)
     GuiService.SelectedObject = target
-    task.wait(0.05)
-    target.Activated:Fire()
     task.wait(0.1)
-    GuiService.SelectedObject = nil
 
+    -- Step 2: confirm with ButtonA (gamepad UI navigation confirm)
+    local pressed = pressButtonA()
+
+    -- Step 3: if ButtonA didn't work, fall back to Activated:Fire()
+    if not pressed then
+        target.Activated:Fire()
+    end
+
+    task.wait(0.15)
+    GuiService.SelectedObject = nil
     return true
 end
 
@@ -417,7 +445,7 @@ _G.runDocksDeliveryFarm = function()
         if not _G.farmRunning then break end
 
         -- STEP 4: Wait for jobs list, click Docks Delivery
-        -- UPDATE the index below once you confirm in-game (0 = first job in list)
+        -- UPDATE the index below once confirmed in-game (0 = first job in list)
         setStatus("Waiting for jobs list...")
         local gotJobs = waitForTalk("jobs currently available", 7)
         if gotJobs then
