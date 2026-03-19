@@ -4,6 +4,7 @@ local player = _G.player
 local RS = _G.RS
 local RunService = _G.RunService
 local GuiService = game:GetService("GuiService")
+local UIS = game:GetService("UserInputService")
 
 -- =====================
 -- AUTO PARRY
@@ -90,7 +91,7 @@ _G.startFly = function()
     flyBG = Instance.new("BodyGyro"); flyBG.Name = "FlyGyro"
     flyBG.MaxTorque = Vector3.new(1e5,1e5,1e5); flyBG.D = 100
     flyBG.CFrame = hrp.CFrame; flyBG.Parent = hrp
-    local UIS = game:GetService("UserInputService"); local camera = workspace.CurrentCamera
+    local camera = workspace.CurrentCamera
     flyConn = RunService.Heartbeat:Connect(function()
         if not flyActive then return end
         local c2 = player.Character; if not c2 then return end
@@ -200,8 +201,10 @@ end
 
 -- =====================
 -- DIALOGUE
--- Uses firesignal(btn.Activated) to click buttons without moving the mouse
--- No alt-tabbing, no system mouse movement, purely GUI-side
+-- Buttons use OptionButton.MouseButton1Click connected server-side
+-- UI Navigation: GuiService:Select(OptionButton) then fire ButtonA input
+-- Roblox replicates the gamepad confirm on selected GUI to server naturally
+-- No mouse movement, no alt-tab
 -- DocksDelivery is #12 in list so we scroll to bottom before clicking
 -- =====================
 local talkRemote = RS.Events.Talk
@@ -238,22 +241,62 @@ _G.waitForTalk = function(containsText, timeoutSecs)
     return false
 end
 
--- Core button clicker - no mouse movement at all
--- Uses firesignal on Activated which works for both mouse and gamepad buttons
-local function clickGuiButton(btn)
+-- Core button clicker using UI Navigation
+-- Selects OptionButton via GuiService then fires gamepad ButtonA
+-- Roblox replicates this to the server's MouseButton1Click connection
+local function clickGuiButton(item)
+    if not item then return false end
+
+    -- get OptionButton child (DialogueModule structure) or the item itself
+    local btn = item:FindFirstChild("OptionButton")
+        or (item:IsA("TextButton") and item)
+        or (item:IsA("ImageButton") and item)
+        or item:FindFirstChildOfClass("TextButton")
+        or item:FindFirstChildOfClass("ImageButton")
+        or item
+
     if not btn then return false end
-    -- try Activated first
-    local ok = pcall(function() firesignal(btn.Activated) end)
-    if not ok then
-        -- fallback: GuiService select then Activated
-        pcall(function() GuiService:Select(btn) end)
-        task.wait(0.05)
-        pcall(function() firesignal(btn.Activated) end)
-    end
+
+    -- enable UI navigation and select the button
+    pcall(function()
+        GuiService.AutoSelectGuiEnabled = true
+        GuiService:Select(btn)
+    end)
+    task.wait(0.05)
+
+    -- fire ButtonA begin (gamepad confirm on selected element)
+    pcall(function()
+        firesignal(UIS.InputBegan, {
+            KeyCode = Enum.KeyCode.ButtonA,
+            UserInputType = Enum.UserInputType.Gamepad1,
+            UserInputState = Enum.UserInputState.Begin,
+            Delta = Vector3.new(),
+            Position = Vector3.new()
+        }, false)
+    end)
+    task.wait(0.05)
+
+    -- fire ButtonA end
+    pcall(function()
+        firesignal(UIS.InputEnded, {
+            KeyCode = Enum.KeyCode.ButtonA,
+            UserInputType = Enum.UserInputType.Gamepad1,
+            UserInputState = Enum.UserInputState.End,
+            Delta = Vector3.new(),
+            Position = Vector3.new()
+        }, false)
+    end)
+
+    -- disable UI navigation again so it doesn't interfere with gameplay
+    pcall(function()
+        GuiService.AutoSelectGuiEnabled = false
+    end)
+
     return true
 end
 
 -- Click dialogue button by index (1 = top button)
+-- Waits for Options frame to be open
 _G.macroClickDialogue = function(buttonIndex, timeoutSecs)
     local pgui = player.PlayerGui
     local deadline = tick() + (timeoutSecs or 6)
@@ -273,12 +316,7 @@ _G.macroClickDialogue = function(buttonIndex, timeoutSecs)
                 end)
                 local target = buttons[buttonIndex]
                 if target then
-                    -- find the actual clickable button inside the item
-                    local btn = (target:IsA("TextButton") or target:IsA("ImageButton")) and target
-                        or target:FindFirstChildOfClass("TextButton")
-                        or target:FindFirstChildOfClass("ImageButton")
-                        or target
-                    clickGuiButton(btn)
+                    clickGuiButton(target)
                     return true
                 end
             end
@@ -288,7 +326,8 @@ _G.macroClickDialogue = function(buttonIndex, timeoutSecs)
     return false
 end
 
--- Click dialogue button by text, with optional scroll to bottom
+-- Click dialogue button by text search
+-- scrollToBottom: true when target is near bottom of list (DocksDelivery = #12)
 _G.clickDialogueByText = function(searchText, scrollToBottom, timeoutSecs)
     local pgui = player.PlayerGui
     local deadline = tick() + (timeoutSecs or 6)
@@ -297,14 +336,13 @@ _G.clickDialogueByText = function(searchText, scrollToBottom, timeoutSecs)
         if dlg and dlg.Enabled then
             local ok, scroll = pcall(function() return dlg.MainFrame.Options.Scroll end)
             if ok and scroll and dlg.MainFrame.Options.AbsoluteSize.Y > 10 then
-                -- jump to bottom of scroll so items near end are visible
+                -- jump scroll to bottom so items near end of list are reachable
                 if scrollToBottom then
                     scroll.CanvasPosition = Vector2.new(0, scroll.AbsoluteCanvasSize.Y)
                     task.wait(0.05)
                 end
                 for _, item in ipairs(scroll:GetChildren()) do
                     if not item:IsA("UIListLayout") then
-                        -- gather all text in item
                         local allText = ""
                         local ok2, t = pcall(function() return item.Text end)
                         if ok2 and t then allText = t end
@@ -313,11 +351,7 @@ _G.clickDialogueByText = function(searchText, scrollToBottom, timeoutSecs)
                             if ok3 and t2 and t2 ~= "" then allText = allText .. " " .. t2 end
                         end
                         if allText:lower():find(searchText:lower(), 1, true) then
-                            local btn = (item:IsA("TextButton") or item:IsA("ImageButton")) and item
-                                or item:FindFirstChildOfClass("TextButton")
-                                or item:FindFirstChildOfClass("ImageButton")
-                                or item
-                            clickGuiButton(btn)
+                            clickGuiButton(item)
                             return true
                         end
                     end
@@ -422,6 +456,7 @@ _G.runDocksDeliveryFarm = function()
         local gotJobs = waitForTalk("jobs currently available", 7)
         if gotJobs then
             setStatus("Clicking 'Docks Delivery'...")
+            -- DocksDelivery is #12 (last) so scroll to bottom first
             local ok2 = clickByText("docks delivery", true, 5)
             if not ok2 then
                 setStatus("Docks not found, restarting...")
