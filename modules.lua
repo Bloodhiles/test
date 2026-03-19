@@ -204,11 +204,12 @@ end
 -- Confirmed structure:
 --   Scroll > Frame "Option" > TextButton "OptionButton" (Selectable: true)
 --
--- The game uses InputBegan with UserInputType.MouseButton1 to detect clicks.
--- Strategy:
---   1. GuiService.SelectedObject = OptionButton  (shows blue highlight)
---   2. Fire InputBegan on the button with a fake MouseButton1 input object
---   3. Fire InputEnded to complete the click cycle
+-- Pure Roblox UI navigation approach:
+--   1. GuiService.GuiNavigationEnabled = true
+--   2. GuiService.SelectedObject = OptionButton  (shows blue highlight)
+--   3. Simulate DPad down presses to reach the target button if needed
+--   4. Confirm with Return/Enter keypress via UIS keypress simulation
+--      (Enter triggers the currently selected GuiButton in Roblox's nav system)
 -- buttonIndex is 0-based: 0 = first option, 1 = second, etc.
 -- =====================
 local talkRemote = RS.Events.Talk
@@ -295,27 +296,6 @@ local function getSortedOptionButtons(scroll)
     return buttons
 end
 
--- Fire a fake MouseButton1 InputBegan + InputEnded on a GuiButton
--- This matches exactly how the game detects clicks via InputBegan
-local function fakeMouseClick(btn)
-    -- Build a fake InputObject-like table
-    local fakeInput = {
-        UserInputType = Enum.UserInputType.MouseButton1,
-        UserInputState = Enum.UserInputState.Begin,
-        KeyCode = Enum.KeyCode.Unknown,
-        Position = Vector3.new(0, 0, 0),
-        Delta = Vector3.new(0, 0, 0),
-    }
-    -- Fire InputBegan (false = not game-processed)
-    btn.InputBegan:Fire(fakeInput, false)
-    task.wait(0.05)
-    -- Fire InputEnded to complete the click
-    fakeInput.UserInputState = Enum.UserInputState.End
-    btn.InputEnded:Fire(fakeInput, false)
-    -- Also fire MouseButton1Click as a fallback
-    pcall(function() btn.MouseButton1Click:Fire() end)
-end
-
 -- navDialogue(0) = 1st option, navDialogue(1) = 2nd option, etc.
 _G.navDialogue = function(buttonIndex, timeoutSecs)
     local scroll = waitForOptions(timeoutSecs or 8)
@@ -345,15 +325,26 @@ _G.navDialogue = function(buttonIndex, timeoutSecs)
     end)
     task.wait(0.05)
 
-    -- Highlight via navigation (shows blue box)
+    -- Enable navigation and select the target button (shows blue highlight)
+    GuiService.GuiNavigationEnabled = true
     GuiService.SelectedObject = target
     task.wait(0.1)
 
-    -- Fire fake MouseButton1 InputBegan/Ended — matches how the game detects clicks
-    fakeMouseClick(target)
+    -- Confirm selection via Return key — Roblox UI nav fires the selected button on Return/Enter
+    local fakeReturn = {
+        KeyCode = Enum.KeyCode.Return,
+        UserInputType = Enum.UserInputType.Keyboard,
+        UserInputState = Enum.UserInputState.Begin,
+    }
+    UIS.InputBegan:Fire(fakeReturn, false)
+    task.wait(0.05)
+    fakeReturn.UserInputState = Enum.UserInputState.End
+    UIS.InputBegan:Fire(fakeReturn, false)
     task.wait(0.15)
 
+    -- Clean up
     GuiService.SelectedObject = nil
+    GuiService.GuiNavigationEnabled = false
     return true
 end
 
