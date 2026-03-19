@@ -204,9 +204,11 @@ end
 -- Confirmed structure:
 --   Scroll > Frame "Option" > TextButton "OptionButton" (Selectable: true)
 --
--- True macro approach: move mouse to the button's screen center and click.
--- mousemoveabs(x, y) moves the OS cursor, mouse1click() fires a real click.
--- This bypasses all Roblox input filtering completely.
+-- The game uses InputBegan with UserInputType.MouseButton1 to detect clicks.
+-- Strategy:
+--   1. GuiService.SelectedObject = OptionButton  (shows blue highlight)
+--   2. Fire InputBegan on the button with a fake MouseButton1 input object
+--   3. Fire InputEnded to complete the click cycle
 -- buttonIndex is 0-based: 0 = first option, 1 = second, etc.
 -- =====================
 local talkRemote = RS.Events.Talk
@@ -293,15 +295,25 @@ local function getSortedOptionButtons(scroll)
     return buttons
 end
 
--- Move mouse to the center of a GuiObject and click it
-local function mouseClickGui(guiObj)
-    local pos = guiObj.AbsolutePosition
-    local size = guiObj.AbsoluteSize
-    local cx = math.floor(pos.X + size.X / 2)
-    local cy = math.floor(pos.Y + size.Y / 2)
-    mousemoveabs(cx, cy)
+-- Fire a fake MouseButton1 InputBegan + InputEnded on a GuiButton
+-- This matches exactly how the game detects clicks via InputBegan
+local function fakeMouseClick(btn)
+    -- Build a fake InputObject-like table
+    local fakeInput = {
+        UserInputType = Enum.UserInputType.MouseButton1,
+        UserInputState = Enum.UserInputState.Begin,
+        KeyCode = Enum.KeyCode.Unknown,
+        Position = Vector3.new(0, 0, 0),
+        Delta = Vector3.new(0, 0, 0),
+    }
+    -- Fire InputBegan (false = not game-processed)
+    btn.InputBegan:Fire(fakeInput, false)
     task.wait(0.05)
-    mouse1click()
+    -- Fire InputEnded to complete the click
+    fakeInput.UserInputState = Enum.UserInputState.End
+    btn.InputEnded:Fire(fakeInput, false)
+    -- Also fire MouseButton1Click as a fallback
+    pcall(function() btn.MouseButton1Click:Fire() end)
 end
 
 -- navDialogue(0) = 1st option, navDialogue(1) = 2nd option, etc.
@@ -326,17 +338,22 @@ _G.navDialogue = function(buttonIndex, timeoutSecs)
 
     local target = buttons[idx]
 
-    -- Scroll canvas so button is on screen
+    -- Scroll canvas so button is visible
     pcall(function()
         local relY = target.AbsolutePosition.Y - scroll.AbsolutePosition.Y
         scroll.CanvasPosition = Vector2.new(0, math.max(0, relY - 20))
     end)
     task.wait(0.05)
 
-    -- Move mouse to button center and click
-    mouseClickGui(target)
+    -- Highlight via navigation (shows blue box)
+    GuiService.SelectedObject = target
+    task.wait(0.1)
+
+    -- Fire fake MouseButton1 InputBegan/Ended — matches how the game detects clicks
+    fakeMouseClick(target)
     task.wait(0.15)
 
+    GuiService.SelectedObject = nil
     return true
 end
 
