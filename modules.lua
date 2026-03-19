@@ -3,6 +3,7 @@
 local player = _G.player
 local RS = _G.RS
 local RunService = _G.RunService
+local GuiService = game:GetService("GuiService")
 
 -- =====================
 -- AUTO PARRY
@@ -199,8 +200,9 @@ end
 
 -- =====================
 -- DIALOGUE
--- Uses AbsolutePosition for macro-style clicking (mousemoveabs + mouse1click)
--- DocksDelivery is #12 in list so we scroll to bottom before clicking it
+-- Uses firesignal(btn.Activated) to click buttons without moving the mouse
+-- No alt-tabbing, no system mouse movement, purely GUI-side
+-- DocksDelivery is #12 in list so we scroll to bottom before clicking
 -- =====================
 local talkRemote = RS.Events.Talk
 local lastTalkText = ""
@@ -236,8 +238,22 @@ _G.waitForTalk = function(containsText, timeoutSecs)
     return false
 end
 
+-- Core button clicker - no mouse movement at all
+-- Uses firesignal on Activated which works for both mouse and gamepad buttons
+local function clickGuiButton(btn)
+    if not btn then return false end
+    -- try Activated first
+    local ok = pcall(function() firesignal(btn.Activated) end)
+    if not ok then
+        -- fallback: GuiService select then Activated
+        pcall(function() GuiService:Select(btn) end)
+        task.wait(0.05)
+        pcall(function() firesignal(btn.Activated) end)
+    end
+    return true
+end
+
 -- Click dialogue button by index (1 = top button)
--- Waits for Options frame to be open before clicking
 _G.macroClickDialogue = function(buttonIndex, timeoutSecs)
     local pgui = player.PlayerGui
     local deadline = tick() + (timeoutSecs or 6)
@@ -257,11 +273,12 @@ _G.macroClickDialogue = function(buttonIndex, timeoutSecs)
                 end)
                 local target = buttons[buttonIndex]
                 if target then
-                    local absPos = target.AbsolutePosition
-                    local absSize = target.AbsoluteSize
-                    mousemoveabs(absPos.X + absSize.X/2, absPos.Y + absSize.Y/2)
-                    task.wait(0.05)
-                    mouse1click()
+                    -- find the actual clickable button inside the item
+                    local btn = (target:IsA("TextButton") or target:IsA("ImageButton")) and target
+                        or target:FindFirstChildOfClass("TextButton")
+                        or target:FindFirstChildOfClass("ImageButton")
+                        or target
+                    clickGuiButton(btn)
                     return true
                 end
             end
@@ -271,8 +288,7 @@ _G.macroClickDialogue = function(buttonIndex, timeoutSecs)
     return false
 end
 
--- Click dialogue button by text search
--- scrollToBottom: set true when target is near bottom of list (e.g. DocksDelivery = #12)
+-- Click dialogue button by text, with optional scroll to bottom
 _G.clickDialogueByText = function(searchText, scrollToBottom, timeoutSecs)
     local pgui = player.PlayerGui
     local deadline = tick() + (timeoutSecs or 6)
@@ -281,13 +297,14 @@ _G.clickDialogueByText = function(searchText, scrollToBottom, timeoutSecs)
         if dlg and dlg.Enabled then
             local ok, scroll = pcall(function() return dlg.MainFrame.Options.Scroll end)
             if ok and scroll and dlg.MainFrame.Options.AbsoluteSize.Y > 10 then
-                -- jump scroll to bottom so items near end of list are visible
+                -- jump to bottom of scroll so items near end are visible
                 if scrollToBottom then
                     scroll.CanvasPosition = Vector2.new(0, scroll.AbsoluteCanvasSize.Y)
                     task.wait(0.05)
                 end
                 for _, item in ipairs(scroll:GetChildren()) do
                     if not item:IsA("UIListLayout") then
+                        -- gather all text in item
                         local allText = ""
                         local ok2, t = pcall(function() return item.Text end)
                         if ok2 and t then allText = t end
@@ -296,15 +313,12 @@ _G.clickDialogueByText = function(searchText, scrollToBottom, timeoutSecs)
                             if ok3 and t2 and t2 ~= "" then allText = allText .. " " .. t2 end
                         end
                         if allText:lower():find(searchText:lower(), 1, true) then
-                            local absPos = item.AbsolutePosition
-                            local absSize = item.AbsoluteSize
-                            -- only click if actually visible on screen
-                            if absPos.Y > 0 and absPos.Y < workspace.CurrentCamera.ViewportSize.Y then
-                                mousemoveabs(absPos.X + absSize.X/2, absPos.Y + absSize.Y/2)
-                                task.wait(0.05)
-                                mouse1click()
-                                return true
-                            end
+                            local btn = (item:IsA("TextButton") or item:IsA("ImageButton")) and item
+                                or item:FindFirstChildOfClass("TextButton")
+                                or item:FindFirstChildOfClass("ImageButton")
+                                or item
+                            clickGuiButton(btn)
+                            return true
                         end
                     end
                 end
@@ -360,9 +374,9 @@ end
 -- Flow:
 -- 1. Talk to Office Contractor
 -- 2. Click "Show me the available jobs." (button 1)
--- 3. Scroll to bottom, click "Docks Delivery" (it's #12 in list)
--- 4. Go to docks, find Twinhook Pirate, talk to them
--- 5. Find shipment prompt, pick it up
+-- 3. Scroll to bottom, click "Docks Delivery" (#12 in list)
+-- 4. Go to docks, find Twinhook Pirate, talk + confirm
+-- 5. Find shipment, pick it up
 -- 6. Return to Office Contractor
 -- 7. Click "I'm here to turn this in." (button 3)
 -- =====================
@@ -400,18 +414,14 @@ _G.runDocksDeliveryFarm = function()
         -- STEP 3: Click "Show me the available jobs." = button 1
         setStatus("Clicking 'Show me the available jobs.'...")
         local ok1 = macroClick(1, 4)
-        if not ok1 then
-            -- fallback text search
-            clickByText("available jobs", false, 3)
-        end
+        if not ok1 then clickByText("available jobs", false, 3) end
         if not _G.farmRunning then break end
 
-        -- STEP 4: Wait for jobs list Talk, scroll to bottom, click Docks Delivery
+        -- STEP 4: Wait for jobs list, scroll to bottom, click Docks Delivery
         setStatus("Waiting for jobs list...")
         local gotJobs = waitForTalk("jobs currently available", 7)
         if gotJobs then
             setStatus("Clicking 'Docks Delivery'...")
-            -- DocksDelivery is #12 (last) so scroll to bottom first
             local ok2 = clickByText("docks delivery", true, 5)
             if not ok2 then
                 setStatus("Docks not found, restarting...")
@@ -458,7 +468,6 @@ _G.runDocksDeliveryFarm = function()
             teleportTo(CFrame.new(docksPos + Vector3.new(0,0,3)))
             waitSec(0.8)
             firePrompt(docksPrompt)
-            -- wait for pirate dialogue then click first option
             local gotPirate = waitForTalk("shipment", 5)
             if gotPirate then macroClick(1, 3) end
             waitSec(1)
@@ -503,9 +512,7 @@ _G.runDocksDeliveryFarm = function()
         if gotGreeting2 then
             setStatus("Clicking 'I'm here to turn this in.'...")
             local ok3 = macroClick(3, 4)
-            if not ok3 then
-                clickByText("turn this in", false, 3)
-            end
+            if not ok3 then clickByText("turn this in", false, 3) end
         end
 
         waitSec(2)
