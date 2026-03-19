@@ -4,7 +4,6 @@ local player = _G.player
 local RS = _G.RS
 local RunService = _G.RunService
 local UIS = game:GetService("UserInputService")
-local GuiService = game:GetService("GuiService")
 
 -- =====================
 -- AUTO PARRY
@@ -201,11 +200,9 @@ end
 
 -- =====================
 -- DIALOGUE
--- Correct approach per Roblox docs:
--- GuiService.GuiNavigationEnabled = true  → enables the blue navigator
--- GuiService.SelectedObject = btn         → puts blue box on that button
--- Navigate down via btn.NextSelectionDown or sorted button list
--- click(btn) on the selected button to confirm
+-- Direct click by sorted position index.
+-- No GuiService navigation — the dialogue UI doesn't wire NextSelectionDown.
+-- buttonIndex is 0-based: 0 = first button, 1 = second, etc.
 -- =====================
 local talkRemote = RS.Events.Talk
 local lastTalkText = ""
@@ -241,20 +238,23 @@ _G.waitForTalk = function(containsText, timeoutSecs)
     return false
 end
 
--- Wait for Options frame to open and have buttons
+-- Wait for Options scroll to be open and have at least one button
 local function waitForOptions(timeoutSecs)
     local pgui = player.PlayerGui
-    local deadline = tick() + (timeoutSecs or 6)
+    local deadline = tick() + (timeoutSecs or 8)
     while tick() < deadline and _G.farmRunning do
         local dlg = pgui:FindFirstChild("Dialogue")
         if dlg and dlg.Enabled then
-            local ok, options = pcall(function() return dlg.MainFrame.Options end)
-            if ok and options and options.AbsoluteSize.Y > 10 then
-                local scroll = options:FindFirstChild("Scroll")
-                if scroll then
+            local scroll
+            pcall(function() scroll = dlg.MainFrame.Options.Scroll end)
+            if scroll then
+                -- Options panel tweens open after text animation; wait for it to have height
+                local optionsOpen = false
+                pcall(function() optionsOpen = dlg.MainFrame.Options.AbsoluteSize.Y > 10 end)
+                if optionsOpen then
                     local count = 0
                     for _, c in ipairs(scroll:GetChildren()) do
-                        if not c:IsA("UIListLayout") then count = count + 1 end
+                        if not c:IsA("UIListLayout") then count += 1 end
                     end
                     if count > 0 then return scroll end
                 end
@@ -265,7 +265,7 @@ local function waitForOptions(timeoutSecs)
     return nil
 end
 
--- Get sorted list of buttons from scroll
+-- Sort buttons top-to-bottom by screen position
 local function getSortedButtons(scroll)
     local buttons = {}
     for _, item in ipairs(scroll:GetChildren()) do
@@ -273,75 +273,51 @@ local function getSortedButtons(scroll)
             table.insert(buttons, item)
         end
     end
-    table.sort(buttons, function(a,b)
+    table.sort(buttons, function(a, b)
         return a.AbsolutePosition.Y < b.AbsolutePosition.Y
     end)
     return buttons
 end
 
--- Get the actual clickable button from a scroll item
-local function getBtn(item)
-    return item:FindFirstChild("OptionButton")
-        or (item:IsA("TextButton") and item)
-        or (item:IsA("ImageButton") and item)
-        or item:FindFirstChildOfClass("TextButton")
-        or item:FindFirstChildOfClass("ImageButton")
-        or item
+-- Fire a click on a GUI button using whatever the executor provides
+local function clickButton(btn)
+    local clicked = false
+    if not clicked then pcall(function() fireclick(btn); clicked = true end) end
+    if not clicked then pcall(function() click(btn); clicked = true end) end
+    if not clicked then pcall(function() btn.MouseButton1Click:Fire(); clicked = true end) end
 end
 
--- Core navigation function
--- downCount = how many times to go down from first button
--- 0 = click first button, 1 = click second, 11 = click 12th (DocksDelivery)
-_G.navDialogue = function(downCount, timeoutSecs)
-    local scroll = waitForOptions(timeoutSecs or 6)
-    if not scroll then return false end
+-- navDialogue(0) = click 1st button, navDialogue(1) = click 2nd, etc.
+_G.navDialogue = function(buttonIndex, timeoutSecs)
+    local scroll = waitForOptions(timeoutSecs or 8)
+    if not scroll then
+        _G.setStatus("navDialogue: options not found (timeout)")
+        return false
+    end
 
     local buttons = getSortedButtons(scroll)
-    if #buttons == 0 then return false end
-
-    -- get first button
-    local targetBtn = getBtn(buttons[1])
-
-    -- enable UI navigation
-    GuiService.GuiNavigationEnabled = true
-    GuiService.SelectedObject = targetBtn
-    task.wait(0.1)
-
-    -- navigate down through the list
-    if downCount and downCount > 0 then
-        for i = 1, downCount do
-            -- try NextSelectionDown property first (proper Roblox nav chain)
-            local current = GuiService.SelectedObject
-            local next = nil
-            if current then
-                pcall(function() next = current.NextSelectionDown end)
-            end
-
-            if next then
-                -- follow proper nav chain
-                GuiService.SelectedObject = next
-            else
-                -- fallback: jump to next button in sorted list
-                local nextItem = buttons[i + 1]
-                if nextItem then
-                    GuiService.SelectedObject = getBtn(nextItem)
-                end
-            end
-            task.wait(0.1)
-        end
+    if #buttons == 0 then
+        _G.setStatus("navDialogue: scroll has no buttons")
+        return false
     end
 
-    -- click whatever is currently selected
-    local selected = GuiService.SelectedObject
-    if selected then
-        pcall(function() click(selected) end)
+    local idx = (buttonIndex or 0) + 1  -- 0-based -> 1-based
+    if idx > #buttons then
+        _G.setStatus("navDialogue: index " .. tostring(buttonIndex) .. " OOB (" .. #buttons .. " buttons)")
+        return false
     end
+
+    local target = buttons[idx]
+
+    -- Scroll canvas so button is visible
+    pcall(function()
+        local relY = target.AbsolutePosition.Y - scroll.AbsolutePosition.Y
+        scroll.CanvasPosition = Vector2.new(0, math.max(0, relY - 20))
+    end)
     task.wait(0.1)
 
-    -- clean up navigation state
-    GuiService.GuiNavigationEnabled = false
-    GuiService.SelectedObject = nil
-
+    clickButton(target)
+    task.wait(0.15)
     return true
 end
 
@@ -387,9 +363,9 @@ end
 
 -- =====================
 -- FARM LOOP
--- navDialogue(0)  = click button 1 "Show me the available jobs."
--- navDialogue(11) = nav down 11x to reach DocksDelivery (#12) then click
--- navDialogue(2)  = nav down 2x to reach button 3 "I'm here to turn this in."
+-- navDialogue(0)  = "Show me the available jobs."  (button 1)
+-- navDialogue(?) = Docks Delivery — UPDATE INDEX once confirmed in-game
+-- navDialogue(2)  = "I'm here to turn this in."    (button 3)
 -- =====================
 _G.runDocksDeliveryFarm = function()
     local teleportTo = _G.teleportTo
@@ -420,17 +396,19 @@ _G.runDocksDeliveryFarm = function()
         if not gotGreeting then setStatus("No greeting, retrying..."); waitSec(2) end
         if not _G.farmRunning then break end
 
-        -- STEP 3: Click "Show me the available jobs." = button 1 (down 0)
+        -- STEP 3: Click "Show me the available jobs." = button index 0
         setStatus("Clicking 'Show me the available jobs.'...")
         navDialogue(0, 4)
         if not _G.farmRunning then break end
 
-        -- STEP 4: Wait for jobs list then nav down 11x to DocksDelivery (#12)
+        -- STEP 4: Wait for jobs list then click Docks Delivery
+        -- NOTE: Change the index below once you confirm which number Docks Delivery is in-game.
+        -- 0 = first job in list, 1 = second, etc.
         setStatus("Waiting for jobs list...")
         local gotJobs = waitForTalk("jobs currently available", 7)
         if gotJobs then
-            setStatus("Navigating to Docks Delivery (#12)...")
-            navDialogue(11, 5)
+            setStatus("Clicking Docks Delivery...")
+            navDialogue(0, 5)  -- <-- UPDATE THIS INDEX if Docks Delivery is not the first job
         else
             setStatus("Jobs list not received, restarting...")
             waitSec(3)
@@ -472,7 +450,6 @@ _G.runDocksDeliveryFarm = function()
             teleportTo(CFrame.new(docksPos + Vector3.new(0,0,3)))
             waitSec(0.8)
             firePrompt(docksPrompt)
-            -- pirate has one option, nav down 0
             local gotPirate = waitForTalk("shipment", 5)
             if gotPirate then navDialogue(0, 3) end
             waitSec(1)
@@ -517,14 +494,13 @@ _G.runDocksDeliveryFarm = function()
             setStatus("Talking to turn in (attempt " .. turnInAttempts .. ")...")
             if prompt then firePrompt(prompt) end
 
-            -- wait for greeting then nav down 2 to button 3 "I'm here to turn this in."
             local gotGreeting2 = waitForTalk("jobs here", 6)
             if gotGreeting2 then
                 setStatus("Clicking 'I'm here to turn this in.'...")
-                navDialogue(2, 4)
+                navDialogue(2, 4)  -- button index 2 = 3rd button "I'm here to turn this in."
             end
 
-            -- check if contract was removed from ContractsActive
+            -- Check if contract was removed from ContractsActive in Stats GUI
             local deadline = tick() + 4
             while tick() < deadline and _G.farmRunning do
                 local pgui = player.PlayerGui
@@ -534,8 +510,8 @@ _G.runDocksDeliveryFarm = function()
                     local active = stats:FindFirstChild("ContractsActive")
                     if active then
                         for _, child in ipairs(active:GetChildren()) do
-                            local ok, t = pcall(function() return child.ContractName.Text end)
-                            if ok and t and t:lower():find("docks", 1, true) then
+                            local ok, ct = pcall(function() return child.ContractName.Text end)
+                            if ok and ct and ct:lower():find("docks", 1, true) then
                                 found = true; break
                             end
                         end
