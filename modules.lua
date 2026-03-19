@@ -3,8 +3,8 @@
 local player = _G.player
 local RS = _G.RS
 local RunService = _G.RunService
-local GuiService = game:GetService("GuiService")
 local UIS = game:GetService("UserInputService")
+local GuiService = game:GetService("GuiService")
 
 -- =====================
 -- AUTO PARRY
@@ -200,12 +200,10 @@ _G.hopToLowServer = function(maxPlayers)
 end
 
 -- =====================
--- DIALOGUE
--- Buttons use OptionButton.MouseButton1Click connected server-side
--- UI Navigation: GuiService:Select(OptionButton) then fire ButtonA input
--- Roblox replicates the gamepad confirm on selected GUI to server naturally
--- No mouse movement, no alt-tab
--- DocksDelivery is #12 in list so we scroll to bottom before clicking
+-- DIALOGUE - PURE NAVIGATION MACRO
+-- Enable UI nav, navigate to first button, then use Down arrow + Enter
+-- No text searching, no GuiObject introspection
+-- Just pure keypress navigation like a human would do with a gamepad
 -- =====================
 local talkRemote = RS.Events.Talk
 local lastTalkText = ""
@@ -241,126 +239,98 @@ _G.waitForTalk = function(containsText, timeoutSecs)
     return false
 end
 
--- Core button clicker using UI Navigation
--- Selects OptionButton via GuiService then fires gamepad ButtonA
--- Roblox replicates this to the server's MouseButton1Click connection
-local function clickGuiButton(item)
-    if not item then return false end
+-- Wait for dialogue options to appear
+local function waitForOptions(timeoutSecs)
+    local pgui = player.PlayerGui
+    local deadline = tick() + (timeoutSecs or 6)
+    while tick() < deadline and _G.farmRunning do
+        local dlg = pgui:FindFirstChild("Dialogue")
+        if dlg and dlg.Enabled then
+            local ok, options = pcall(function() return dlg.MainFrame.Options end)
+            if ok and options and options.AbsoluteSize.Y > 10 then
+                local scroll = options:FindFirstChild("Scroll")
+                if scroll then
+                    local count = 0
+                    for _, c in ipairs(scroll:GetChildren()) do
+                        if not c:IsA("UIListLayout") then count = count + 1 end
+                    end
+                    if count > 0 then return true end
+                end
+            end
+        end
+        task.wait(0.05)
+    end
+    return false
+end
 
-    -- get OptionButton child (DialogueModule structure) or the item itself
-    local btn = item:FindFirstChild("OptionButton")
-        or (item:IsA("TextButton") and item)
-        or (item:IsA("ImageButton") and item)
-        or item:FindFirstChildOfClass("TextButton")
-        or item:FindFirstChildOfClass("ImageButton")
-        or item
+-- Enable UI navigation and select the first button in the Scroll
+local function selectFirstButton()
+    local pgui = player.PlayerGui
+    local dlg = pgui:FindFirstChild("Dialogue")
+    if not dlg then return false end
+    local ok, scroll = pcall(function() return dlg.MainFrame.Options.Scroll end)
+    if not ok then return false end
 
-    if not btn then return false end
-
-    -- enable UI navigation and select the button
-    pcall(function()
-        GuiService.AutoSelectGuiEnabled = true
-        GuiService:Select(btn)
-    end)
-    task.wait(0.05)
-
-    -- fire ButtonA begin (gamepad confirm on selected element)
-    pcall(function()
-        firesignal(UIS.InputBegan, {
-            KeyCode = Enum.KeyCode.ButtonA,
-            UserInputType = Enum.UserInputType.Gamepad1,
-            UserInputState = Enum.UserInputState.Begin,
-            Delta = Vector3.new(),
-            Position = Vector3.new()
-        }, false)
-    end)
-    task.wait(0.05)
-
-    -- fire ButtonA end
-    pcall(function()
-        firesignal(UIS.InputEnded, {
-            KeyCode = Enum.KeyCode.ButtonA,
-            UserInputType = Enum.UserInputType.Gamepad1,
-            UserInputState = Enum.UserInputState.End,
-            Delta = Vector3.new(),
-            Position = Vector3.new()
-        }, false)
+    -- find first non-layout child sorted by position
+    local buttons = {}
+    for _, item in ipairs(scroll:GetChildren()) do
+        if not item:IsA("UIListLayout") then
+            table.insert(buttons, item)
+        end
+    end
+    table.sort(buttons, function(a,b)
+        return a.AbsolutePosition.Y < b.AbsolutePosition.Y
     end)
 
-    -- disable UI navigation again so it doesn't interfere with gameplay
-    pcall(function()
-        GuiService.AutoSelectGuiEnabled = false
-    end)
+    if #buttons == 0 then return false end
 
+    -- get the actual clickable button
+    local first = buttons[1]
+    local btn = first:FindFirstChild("OptionButton")
+        or (first:IsA("TextButton") and first)
+        or first:FindFirstChildOfClass("TextButton")
+        or first:FindFirstChildOfClass("ImageButton")
+        or first
+
+    -- enable UI nav and select it
+    pcall(function() GuiService.AutoSelectGuiEnabled = true end)
+    pcall(function() GuiService:Select(btn) end)
+    task.wait(0.1)
     return true
 end
 
--- Click dialogue button by index (1 = top button)
--- Waits for Options frame to be open
-_G.macroClickDialogue = function(buttonIndex, timeoutSecs)
-    local pgui = player.PlayerGui
-    local deadline = tick() + (timeoutSecs or 6)
-    while tick() < deadline and _G.farmRunning do
-        local dlg = pgui:FindFirstChild("Dialogue")
-        if dlg and dlg.Enabled then
-            local ok, scroll = pcall(function() return dlg.MainFrame.Options.Scroll end)
-            if ok and scroll and dlg.MainFrame.Options.AbsoluteSize.Y > 10 then
-                local buttons = {}
-                for _, item in ipairs(scroll:GetChildren()) do
-                    if not item:IsA("UIListLayout") then
-                        table.insert(buttons, item)
-                    end
-                end
-                table.sort(buttons, function(a,b)
-                    return a.AbsolutePosition.Y < b.AbsolutePosition.Y
-                end)
-                local target = buttons[buttonIndex]
-                if target then
-                    clickGuiButton(target)
-                    return true
-                end
-            end
-        end
+-- Navigate down N times using arrow key
+local function navDown(times)
+    times = times or 1
+    for i = 1, times do
+        pcall(function() keypress(Enum.KeyCode.Down) end)
         task.wait(0.05)
+        pcall(function() keyrelease(Enum.KeyCode.Down) end)
+        task.wait(0.1)
     end
-    return false
 end
 
--- Click dialogue button by text search
--- scrollToBottom: true when target is near bottom of list (DocksDelivery = #12)
-_G.clickDialogueByText = function(searchText, scrollToBottom, timeoutSecs)
-    local pgui = player.PlayerGui
-    local deadline = tick() + (timeoutSecs or 6)
-    while tick() < deadline and _G.farmRunning do
-        local dlg = pgui:FindFirstChild("Dialogue")
-        if dlg and dlg.Enabled then
-            local ok, scroll = pcall(function() return dlg.MainFrame.Options.Scroll end)
-            if ok and scroll and dlg.MainFrame.Options.AbsoluteSize.Y > 10 then
-                -- jump scroll to bottom so items near end of list are reachable
-                if scrollToBottom then
-                    scroll.CanvasPosition = Vector2.new(0, scroll.AbsoluteCanvasSize.Y)
-                    task.wait(0.05)
-                end
-                for _, item in ipairs(scroll:GetChildren()) do
-                    if not item:IsA("UIListLayout") then
-                        local allText = ""
-                        local ok2, t = pcall(function() return item.Text end)
-                        if ok2 and t then allText = t end
-                        for _, d in ipairs(item:GetDescendants()) do
-                            local ok3, t2 = pcall(function() return d.Text end)
-                            if ok3 and t2 and t2 ~= "" then allText = allText .. " " .. t2 end
-                        end
-                        if allText:lower():find(searchText:lower(), 1, true) then
-                            clickGuiButton(item)
-                            return true
-                        end
-                    end
-                end
-            end
-        end
-        task.wait(0.05)
+-- Press Enter to confirm selected button
+local function navConfirm()
+    pcall(function() keypress(Enum.KeyCode.Return) end)
+    task.wait(0.05)
+    pcall(function() keyrelease(Enum.KeyCode.Return) end)
+    task.wait(0.1)
+    -- disable UI nav after confirming
+    pcall(function() GuiService.AutoSelectGuiEnabled = false end)
+end
+
+-- Full navigation sequence:
+-- selectFirstButton() → navDown(n) → navConfirm()
+-- downCount = 0 means click the first/currently selected button
+_G.navDialogue = function(downCount, timeoutSecs)
+    if not waitForOptions(timeoutSecs or 5) then return false end
+    if not selectFirstButton() then return false end
+    if downCount and downCount > 0 then
+        navDown(downCount)
     end
-    return false
+    navConfirm()
+    return true
 end
 
 -- =====================
@@ -405,14 +375,10 @@ end
 
 -- =====================
 -- FARM LOOP
--- Flow:
--- 1. Talk to Office Contractor
--- 2. Click "Show me the available jobs." (button 1)
--- 3. Scroll to bottom, click "Docks Delivery" (#12 in list)
--- 4. Go to docks, find Twinhook Pirate, talk + confirm
--- 5. Find shipment, pick it up
--- 6. Return to Office Contractor
--- 7. Click "I'm here to turn this in." (button 3)
+-- Pure navigation macro:
+-- Greeting: navDialogue(0) = click button 1 "Show me the available jobs."
+-- Jobs list: navDialogue(11) = navigate down 11x to reach DocksDelivery (#12) then Enter
+-- Turn in: navDialogue(2) = navigate down 2x to reach button 3 "I'm here to turn this in."
 -- =====================
 _G.runDocksDeliveryFarm = function()
     local teleportTo = _G.teleportTo
@@ -420,8 +386,7 @@ _G.runDocksDeliveryFarm = function()
     local waitSec = _G.waitSec
     local setStatus = _G.setStatus
     local waitForTalk = _G.waitForTalk
-    local macroClick = _G.macroClickDialogue
-    local clickByText = _G.clickDialogueByText
+    local navDialogue = _G.navDialogue
     local findDocksNPC = _G.findDocksNPC
     local findShipment = _G.findShipmentPrompt
 
@@ -439,29 +404,24 @@ _G.runDocksDeliveryFarm = function()
         local prompt = npc:FindFirstChild("InteractPrompt", true)
         if prompt then firePrompt(prompt) end
 
-        -- Wait for greeting to finish animating
-        setStatus("Waiting for dialogue...")
+        -- Wait for greeting
+        setStatus("Waiting for greeting...")
         local gotGreeting = waitForTalk("jobs here", 6)
-        if not gotGreeting then setStatus("No dialogue, retrying..."); waitSec(2) end
+        if not gotGreeting then setStatus("No greeting, retrying..."); waitSec(2) end
         if not _G.farmRunning then break end
 
-        -- STEP 3: Click "Show me the available jobs." = button 1
+        -- STEP 3: Click "Show me the available jobs." = button 1 (down 0)
         setStatus("Clicking 'Show me the available jobs.'...")
-        local ok1 = macroClick(1, 4)
-        if not ok1 then clickByText("available jobs", false, 3) end
+        navDialogue(0, 4)
         if not _G.farmRunning then break end
 
-        -- STEP 4: Wait for jobs list, scroll to bottom, click Docks Delivery
+        -- STEP 4: Wait for jobs list then navigate to Docks Delivery
+        -- DocksDelivery is #12 in list = navigate down 11 times from button 1
         setStatus("Waiting for jobs list...")
         local gotJobs = waitForTalk("jobs currently available", 7)
         if gotJobs then
-            setStatus("Clicking 'Docks Delivery'...")
-            -- DocksDelivery is #12 (last) so scroll to bottom first
-            local ok2 = clickByText("docks delivery", true, 5)
-            if not ok2 then
-                setStatus("Docks not found, restarting...")
-                waitSec(3)
-            end
+            setStatus("Navigating to Docks Delivery...")
+            navDialogue(11, 5)
         else
             setStatus("Jobs list not received, restarting...")
             waitSec(3)
@@ -503,8 +463,9 @@ _G.runDocksDeliveryFarm = function()
             teleportTo(CFrame.new(docksPos + Vector3.new(0,0,3)))
             waitSec(0.8)
             firePrompt(docksPrompt)
+            -- wait for pirate talk then click first option (down 0)
             local gotPirate = waitForTalk("shipment", 5)
-            if gotPirate then macroClick(1, 3) end
+            if gotPirate then navDialogue(0, 3) end
             waitSec(1)
         else
             setStatus("Pirate not found, continuing...")
@@ -534,26 +495,65 @@ _G.runDocksDeliveryFarm = function()
         end
         if not _G.farmRunning then break end
 
-        -- STEP 8: Return to Office Contractor and turn in
+        -- STEP 8: Return and turn in
+        -- Retry loop in case turn-in doesn't register first time
         setStatus("Returning to turn in...")
         teleportTo(CFrame.new(_G.OFFICE_CONTRACTOR_POS + Vector3.new(0,0,3)))
         waitSec(1.5); if not _G.farmRunning then break end
 
-        setStatus("Talking to turn in...")
-        if prompt then firePrompt(prompt) end
+        local turnInDone = false
+        local turnInAttempts = 0
 
-        -- Wait for greeting then click "I'm here to turn this in." = button 3
-        local gotGreeting2 = waitForTalk("jobs here", 6)
-        if gotGreeting2 then
-            setStatus("Clicking 'I'm here to turn this in.'...")
-            local ok3 = macroClick(3, 4)
-            if not ok3 then clickByText("turn this in", false, 3) end
+        while not turnInDone and turnInAttempts < 3 and _G.farmRunning do
+            turnInAttempts = turnInAttempts + 1
+            setStatus("Talking to turn in (attempt " .. turnInAttempts .. ")...")
+            if prompt then firePrompt(prompt) end
+
+            -- Wait for greeting then navigate down 2 to "I'm here to turn this in." = button 3
+            local gotGreeting2 = waitForTalk("jobs here", 6)
+            if gotGreeting2 then
+                setStatus("Clicking 'I'm here to turn this in.'...")
+                navDialogue(2, 4)
+            end
+
+            -- Check if contract was removed (turn-in successful)
+            local deadline = tick() + 4
+            while tick() < deadline and _G.farmRunning do
+                -- Check ContractsActive in PlayerGui — if no Docks contract exists, turn-in worked
+                local pgui = player.PlayerGui
+                local stats = pgui:FindFirstChild("Stats")
+                local found = false
+                if stats then
+                    local active = stats:FindFirstChild("ContractsActive")
+                    if active then
+                        for _, child in ipairs(active:GetChildren()) do
+                            local ok, t = pcall(function() return child.ContractName.Text end)
+                            if ok and t and t:lower():find("docks", 1, true) then
+                                found = true; break
+                            end
+                        end
+                    end
+                end
+                if not found then
+                    turnInDone = true
+                    break
+                end
+                task.wait(0.2)
+            end
+
+            if not turnInDone and turnInAttempts < 3 then
+                setStatus("Turn-in not confirmed, retrying...")
+                waitSec(1)
+            end
         end
 
-        waitSec(2)
-        setStatus("Contract complete ✓")
-        if not _G.farmRunning then break end
+        if turnInDone then
+            setStatus("Contract complete ✓")
+        else
+            setStatus("Turn-in failed, restarting loop...")
+        end
 
+        if not _G.farmRunning then break end
         setStatus("Cooldown...")
         waitSec(3)
     end
