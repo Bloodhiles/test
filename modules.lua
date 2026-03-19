@@ -4,6 +4,7 @@ local player = _G.player
 local RS = _G.RS
 local RunService = _G.RunService
 local UIS = game:GetService("UserInputService")
+local GuiService = game:GetService("GuiService")
 
 -- =====================
 -- AUTO PARRY
@@ -200,9 +201,17 @@ end
 
 -- =====================
 -- DIALOGUE
--- Direct click by sorted position index.
--- No GuiService navigation — the dialogue UI doesn't wire NextSelectionDown.
--- buttonIndex is 0-based: 0 = first button, 1 = second, etc.
+-- Confirmed structure from in-game inspection:
+--   Scroll
+--     Frame "Option"              <- NOT selectable, no NextSelectionDown
+--       TextLabel  "OptionText"
+--       TextButton "OptionButton" <- Selectable: true  ← we target this
+--       ImageLabel "Divider"
+--       ImageLabel "ImagePreview"
+--
+-- Strategy: sort Option frames by Y, grab their OptionButton child,
+-- set GuiService.SelectedObject = that button, then fire Activated on it.
+-- buttonIndex is 0-based: 0 = first, 1 = second, etc.
 -- =====================
 local talkRemote = RS.Events.Talk
 local lastTalkText = ""
@@ -238,7 +247,7 @@ _G.waitForTalk = function(containsText, timeoutSecs)
     return false
 end
 
--- Wait for Options scroll to be open and have at least one button
+-- Wait for the Options panel to tween open and have at least one Option frame
 local function waitForOptions(timeoutSecs)
     local pgui = player.PlayerGui
     local deadline = tick() + (timeoutSecs or 8)
@@ -248,7 +257,6 @@ local function waitForOptions(timeoutSecs)
             local scroll
             pcall(function() scroll = dlg.MainFrame.Options.Scroll end)
             if scroll then
-                -- Options panel tweens open after text animation; wait for it to have height
                 local optionsOpen = false
                 pcall(function() optionsOpen = dlg.MainFrame.Options.AbsoluteSize.Y > 10 end)
                 if optionsOpen then
@@ -265,43 +273,45 @@ local function waitForOptions(timeoutSecs)
     return nil
 end
 
--- Sort buttons top-to-bottom by screen position
-local function getSortedButtons(scroll)
-    local buttons = {}
+-- Sort Option frames by screen Y, extract their OptionButton children in order
+local function getSortedOptionButtons(scroll)
+    local frames = {}
     for _, item in ipairs(scroll:GetChildren()) do
         if not item:IsA("UIListLayout") then
-            table.insert(buttons, item)
+            table.insert(frames, item)
         end
     end
-    table.sort(buttons, function(a, b)
+    table.sort(frames, function(a, b)
         return a.AbsolutePosition.Y < b.AbsolutePosition.Y
     end)
+    local buttons = {}
+    for _, frame in ipairs(frames) do
+        local btn = frame:FindFirstChild("OptionButton")
+        if btn and btn:IsA("TextButton") then
+            table.insert(buttons, btn)
+        else
+            local any = frame:FindFirstChildOfClass("TextButton")
+            if any then table.insert(buttons, any) end
+        end
+    end
     return buttons
 end
 
--- Fire a click on a GUI button using whatever the executor provides
-local function clickButton(btn)
-    local clicked = false
-    if not clicked then pcall(function() fireclick(btn); clicked = true end) end
-    if not clicked then pcall(function() click(btn); clicked = true end) end
-    if not clicked then pcall(function() btn.MouseButton1Click:Fire(); clicked = true end) end
-end
-
--- navDialogue(0) = click 1st button, navDialogue(1) = click 2nd, etc.
+-- navDialogue(0) = 1st option, navDialogue(1) = 2nd option, etc.
 _G.navDialogue = function(buttonIndex, timeoutSecs)
     local scroll = waitForOptions(timeoutSecs or 8)
     if not scroll then
-        _G.setStatus("navDialogue: options not found (timeout)")
+        _G.setStatus("navDialogue: options timed out")
         return false
     end
 
-    local buttons = getSortedButtons(scroll)
+    local buttons = getSortedOptionButtons(scroll)
     if #buttons == 0 then
-        _G.setStatus("navDialogue: scroll has no buttons")
+        _G.setStatus("navDialogue: no OptionButtons found")
         return false
     end
 
-    local idx = (buttonIndex or 0) + 1  -- 0-based -> 1-based
+    local idx = (buttonIndex or 0) + 1  -- 0-based to 1-based
     if idx > #buttons then
         _G.setStatus("navDialogue: index " .. tostring(buttonIndex) .. " OOB (" .. #buttons .. " buttons)")
         return false
@@ -314,10 +324,15 @@ _G.navDialogue = function(buttonIndex, timeoutSecs)
         local relY = target.AbsolutePosition.Y - scroll.AbsolutePosition.Y
         scroll.CanvasPosition = Vector2.new(0, math.max(0, relY - 20))
     end)
-    task.wait(0.1)
+    task.wait(0.05)
 
-    clickButton(target)
-    task.wait(0.15)
+    -- Select the button via GuiService then fire Activated (Roblox UI navigation confirm)
+    GuiService.SelectedObject = target
+    task.wait(0.05)
+    target.Activated:Fire()
+    task.wait(0.1)
+    GuiService.SelectedObject = nil
+
     return true
 end
 
@@ -363,9 +378,9 @@ end
 
 -- =====================
 -- FARM LOOP
--- navDialogue(0)  = "Show me the available jobs."  (button 1)
--- navDialogue(?) = Docks Delivery — UPDATE INDEX once confirmed in-game
--- navDialogue(2)  = "I'm here to turn this in."    (button 3)
+-- navDialogue(0) = "Show me the available jobs."  (1st button)
+-- navDialogue(?) = Docks Delivery — UPDATE index once confirmed in-game
+-- navDialogue(2) = "I'm here to turn this in."   (3rd button)
 -- =====================
 _G.runDocksDeliveryFarm = function()
     local teleportTo = _G.teleportTo
@@ -396,19 +411,18 @@ _G.runDocksDeliveryFarm = function()
         if not gotGreeting then setStatus("No greeting, retrying..."); waitSec(2) end
         if not _G.farmRunning then break end
 
-        -- STEP 3: Click "Show me the available jobs." = button index 0
+        -- STEP 3: Click "Show me the available jobs." = index 0
         setStatus("Clicking 'Show me the available jobs.'...")
-        navDialogue(0, 4)
+        navDialogue(0, 6)
         if not _G.farmRunning then break end
 
-        -- STEP 4: Wait for jobs list then click Docks Delivery
-        -- NOTE: Change the index below once you confirm which number Docks Delivery is in-game.
-        -- 0 = first job in list, 1 = second, etc.
+        -- STEP 4: Wait for jobs list, click Docks Delivery
+        -- UPDATE the index below once you confirm in-game (0 = first job in list)
         setStatus("Waiting for jobs list...")
         local gotJobs = waitForTalk("jobs currently available", 7)
         if gotJobs then
             setStatus("Clicking Docks Delivery...")
-            navDialogue(0, 5)  -- <-- UPDATE THIS INDEX if Docks Delivery is not the first job
+            navDialogue(0, 6)  -- <-- UPDATE THIS INDEX
         else
             setStatus("Jobs list not received, restarting...")
             waitSec(3)
@@ -481,7 +495,7 @@ _G.runDocksDeliveryFarm = function()
         end
         if not _G.farmRunning then break end
 
-        -- STEP 8: Return and turn in with retry loop
+        -- STEP 8: Return and turn in
         setStatus("Returning to turn in...")
         teleportTo(CFrame.new(_G.OFFICE_CONTRACTOR_POS + Vector3.new(0,0,3)))
         waitSec(1.5); if not _G.farmRunning then break end
@@ -497,10 +511,9 @@ _G.runDocksDeliveryFarm = function()
             local gotGreeting2 = waitForTalk("jobs here", 6)
             if gotGreeting2 then
                 setStatus("Clicking 'I'm here to turn this in.'...")
-                navDialogue(2, 4)  -- button index 2 = 3rd button "I'm here to turn this in."
+                navDialogue(2, 6)  -- 3rd button
             end
 
-            -- Check if contract was removed from ContractsActive in Stats GUI
             local deadline = tick() + 4
             while tick() < deadline and _G.farmRunning do
                 local pgui = player.PlayerGui
