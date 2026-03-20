@@ -55,12 +55,15 @@ _G.startAutoParry = function()
     if autoParryConn then autoParryConn:Disconnect(); autoParryConn = nil end
     autoParryActive = true
     if _G.autoParryLabel then _G.autoParryLabel.Text = "ON — waiting..." end
-    autoParryConn = RS.Events.PerilousAttack.OnClientEvent:Connect(function(attacker, attackType)
+    -- FIX: attacker arg is a STRING (attacker name), NOT a Model instance.
+    -- The old code called attacker:FindFirstChild() on a string, which errored
+    -- silently every time and swallowed the entire parry attempt.
+    -- Also skip Unblockable attacks — they can't be parried.
+    autoParryConn = RS.Events.PerilousAttack.OnClientEvent:Connect(function(attackerName, attackType)
         if not autoParryActive then return end
-        local char = player.Character; if not char then return end
-        local hrp = char:FindFirstChild("HumanoidRootPart"); if not hrp then return end
-        if attacker and attacker:FindFirstChild("HumanoidRootPart") then
-            if (hrp.Position - attacker.HumanoidRootPart.Position).Magnitude > 70 then return end
+        if tostring(attackType) == "Unblockable" then
+            if _G.autoParryLabel then _G.autoParryLabel.Text = "ON — skip Unblockable" end
+            return
         end
         task.delay(math.random(50, 120) / 1000, function()
             if not autoParryActive then return end
