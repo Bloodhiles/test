@@ -15,14 +15,24 @@ _G.autoParryLabel = nil
 
 local function canParry()
     local char = player.Character; if not char then return false end
-    if char:GetAttribute("ParryCD") then return false end
-    if char:FindFirstChild("NoParry") then return false end
-    if char:FindFirstChild("UsingMove") then return false end
-    if char:FindFirstChild("LightAttack") then return false end
-    if char:FindFirstChild("HeavyAttack") then return false end
-    if char:FindFirstChild("Grabbed") then return false end
-    if char:FindFirstChild("Knocked") then return false end
-    if char:FindFirstChild("Ragdolled") then return false end
+    -- FIX: Use GetAttribute and check truthiness properly.
+    -- ParryCD is a number/timestamp when on cooldown, nil or 0 when ready.
+    local pcd = char:GetAttribute("ParryCD")
+    if pcd and pcd ~= false and pcd ~= 0 then return false end
+    -- FIX: FindFirstChild returns the object, not a bool. Check Value property.
+    local function boolBlock(name)
+        local v = char:FindFirstChild(name)
+        if not v then return false end
+        if v:IsA("BoolValue") then return v.Value end
+        return true -- exists as a non-BoolValue instance = blocked
+    end
+    if boolBlock("NoParry") then return false end
+    if boolBlock("UsingMove") then return false end
+    if boolBlock("LightAttack") then return false end
+    if boolBlock("HeavyAttack") then return false end
+    if boolBlock("Grabbed") then return false end
+    if boolBlock("Knocked") then return false end
+    if boolBlock("Ragdolled") then return false end
     if char:HasTag("FragileParry") then return false end
     return true
 end
@@ -201,13 +211,16 @@ end
 
 -- =====================
 -- DIALOGUE
--- Confirmed structure:
---   Scroll > Frame "Option" > TextButton "OptionButton" (Selectable: true)
 --
--- Approach: GuiService navigation highlight + firesignal on every connection
--- firesignal fires ALL connections on a signal directly, bypassing input filtering.
--- Tries MouseButton1Click first, then MouseButton1Down, then Activated as fallbacks.
--- buttonIndex is 0-based: 0 = first option, 1 = second, etc.
+-- CONFIRMED structure (from live dump):
+--   Options (Frame) > Scroll (ScrollingFrame) > "Option" (Frame) > OptionButton (TextButton) + OptionText (TextLabel)
+--
+-- CONFIRMED: OptionButton has Click:1 Down:1 Activated:1 connections.
+-- OptionText holds the visible text — OptionButton.Text is empty.
+--
+-- FIX: Removed GuiService navigation (it interferes with the Handler).
+--      Fire MouseButton1Click directly via firesignal.
+--      Sort frames by AbsolutePosition.Y (already correct).
 -- =====================
 local talkRemote = RS.Events.Talk
 local lastTalkText = ""
@@ -243,7 +256,7 @@ _G.waitForTalk = function(containsText, timeoutSecs)
     return false
 end
 
--- Wait for Options panel to tween open and have buttons
+-- Wait for Options panel to have buttons
 local function waitForOptions(timeoutSecs)
     local pgui = player.PlayerGui
     local deadline = tick() + (timeoutSecs or 8)
@@ -253,9 +266,10 @@ local function waitForOptions(timeoutSecs)
             local scroll
             pcall(function() scroll = dlg.MainFrame.Options.Scroll end)
             if scroll then
-                local optionsOpen = false
-                pcall(function() optionsOpen = dlg.MainFrame.Options.AbsoluteSize.Y > 10 end)
-                if optionsOpen then
+                -- FIX: Check AbsoluteSize of Options, not Scroll CanvasSize (canvas stays 0,0)
+                local optionsVisible = false
+                pcall(function() optionsVisible = dlg.MainFrame.Options.AbsoluteSize.Y > 10 end)
+                if optionsVisible then
                     local count = 0
                     for _, c in ipairs(scroll:GetChildren()) do
                         if not c:IsA("UIListLayout") then count += 1 end
@@ -293,26 +307,22 @@ local function getSortedOptionButtons(scroll)
     return buttons
 end
 
--- Fire all connections on a button's signals using firesignal (Velocity/executor function)
--- Tries each signal in order until one has connections
+-- FIX: Removed GuiService navigation entirely — it was interfering with the game's Handler.
+-- Simply firesignal MouseButton1Click directly. That connection is confirmed to exist (1 conn).
 local function fireButtonSignals(btn)
-    local signals = {
-        btn.MouseButton1Click,
-        btn.MouseButton1Down,
-        btn.Activated,
-    }
-    for _, sig in ipairs(signals) do
-        local conns = {}
-        pcall(function() conns = getconnections(sig) end)
+    -- Try MouseButton1Click first (confirmed 1 connection)
+    local fired = false
+    pcall(function()
+        local conns = getconnections(btn.MouseButton1Click)
         if #conns > 0 then
-            pcall(function() firesignal(sig) end)
-            return true
+            firesignal(btn.MouseButton1Click)
+            fired = true
         end
-    end
-    -- fallback: try firesignal on all anyway
-    for _, sig in ipairs(signals) do
-        pcall(function() firesignal(sig) end)
-    end
+    end)
+    if fired then return true end
+    -- Fallback: MouseButton1Down, then Activated
+    pcall(function() firesignal(btn.MouseButton1Down) end)
+    pcall(function() firesignal(btn.Activated) end)
     return false
 end
 
@@ -338,24 +348,11 @@ _G.navDialogue = function(buttonIndex, timeoutSecs)
 
     local target = buttons[idx]
 
-    -- Scroll canvas so button is visible
-    pcall(function()
-        local relY = target.AbsolutePosition.Y - scroll.AbsolutePosition.Y
-        scroll.CanvasPosition = Vector2.new(0, math.max(0, relY - 20))
-    end)
-    task.wait(0.05)
-
-    -- Highlight via navigation (shows blue box — purely visual)
-    GuiService.GuiNavigationEnabled = true
-    GuiService.SelectedObject = target
-    task.wait(0.1)
-
-    -- Fire all connections on the button's click signals
+    -- FIX: Removed GuiService navigation — no more SelectedObject, no more GuiNavigationEnabled.
+    -- Just fire the button directly.
     fireButtonSignals(target)
-    task.wait(0.15)
+    task.wait(0.2)
 
-    GuiService.SelectedObject = nil
-    GuiService.GuiNavigationEnabled = false
     return true
 end
 
