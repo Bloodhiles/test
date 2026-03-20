@@ -55,16 +55,42 @@ _G.startAutoParry = function()
     if autoParryConn then autoParryConn:Disconnect(); autoParryConn = nil end
     autoParryActive = true
     if _G.autoParryLabel then _G.autoParryLabel.Text = "ON — waiting..." end
-    -- FIX: attacker arg is a STRING (attacker name), NOT a Model instance.
-    -- The old code called attacker:FindFirstChild() on a string, which errored
-    -- silently every time and swallowed the entire parry attempt.
-    -- Also skip Unblockable attacks — they can't be parried.
-    autoParryConn = RS.Events.PerilousAttack.OnClientEvent:Connect(function(attackerName, attackType)
+    -- FIX: arg1 can be an Instance (NPC Model) or a string (player username).
+    -- The game broadcasts PerilousAttack to ALL nearby clients, not just the target.
+    -- Filter by distance: only parry if the attacker is within 60 studs of us.
+    -- Unblockable attacks can't be parried so skip those too.
+    autoParryConn = RS.Events.PerilousAttack.OnClientEvent:Connect(function(attacker, attackType)
         if not autoParryActive then return end
         if tostring(attackType) == "Unblockable" then
             if _G.autoParryLabel then _G.autoParryLabel.Text = "ON — skip Unblockable" end
             return
         end
+
+        -- Distance check — find attacker's HumanoidRootPart
+        local char = player.Character
+        local myHRP = char and char:FindFirstChild("HumanoidRootPart")
+        if myHRP then
+            local attackerHRP = nil
+            if typeof(attacker) == "Instance" then
+                -- NPC or player Model passed directly
+                attackerHRP = attacker:FindFirstChild("HumanoidRootPart")
+            elseif type(attacker) == "string" then
+                -- Player username passed as string — look up their character
+                local attackerPlayer = game:GetService("Players"):FindFirstChild(attacker)
+                if attackerPlayer and attackerPlayer.Character then
+                    attackerHRP = attackerPlayer.Character:FindFirstChild("HumanoidRootPart")
+                end
+            end
+            if attackerHRP then
+                local dist = (myHRP.Position - attackerHRP.Position).Magnitude
+                if dist > 60 then
+                    if _G.autoParryLabel then _G.autoParryLabel.Text = "ON — too far (" .. math.floor(dist) .. ")" end
+                    return
+                end
+            end
+            -- If we can't find attacker HRP, still parry (better safe than miss)
+        end
+
         task.delay(math.random(50, 120) / 1000, function()
             if not autoParryActive then return end
             doParry(attackType)
@@ -245,10 +271,13 @@ local function getTextAnimDuration(text)
 end
 
 _G.waitForTalk = function(containsText, timeoutSecs)
-    lastTalkText = ""; lastTalkTime = 0
+    -- FIX: Don't reset lastTalkText/Time here — Talk can fire before waitForTalk is called.
+    -- Instead track a "since" timestamp so we only accept Talk events that fired AFTER
+    -- the farm step that called waitForTalk began (within a 2s grace window).
+    local since = tick() - 2  -- accept Talk events up to 2s in the past
     local deadline = tick() + (timeoutSecs or 8)
     while tick() < deadline and _G.farmRunning do
-        if lastTalkText:lower():find(containsText:lower(), 1, true) then
+        if lastTalkTime >= since and lastTalkText:lower():find(containsText:lower(), 1, true) then
             local elapsed = tick() - lastTalkTime
             local remaining = getTextAnimDuration(lastTalkText) - elapsed
             if remaining > 0 then task.wait(remaining) end
@@ -424,11 +453,18 @@ _G.runDocksDeliveryFarm = function()
         setStatus("Talking to Office Contractor...")
         local npc = workspace.NPCS:FindFirstChild("Office Contractor")
         if not npc then setStatus("NPC not found!"); waitSec(3); break end
+        -- FIX: Teleport right next to NPC and wait 2.5s for server to register position
+        -- before firing prompt — otherwise server rejects it (too far away)
+        local npcHRP = npc:FindFirstChild("HumanoidRootPart")
         local prompt = npc:FindFirstChild("InteractPrompt", true)
+        if npcHRP then
+            teleportTo(npcHRP.CFrame * CFrame.new(0, 0, -3))
+            waitSec(2.5)
+        end
         if prompt then firePrompt(prompt) end
 
         setStatus("Waiting for greeting...")
-        local gotGreeting = waitForTalk("jobs here", 6)
+        local gotGreeting = waitForTalk("jobs here", 8)
         if not gotGreeting then setStatus("No greeting, retrying..."); waitSec(2) end
         if not _G.farmRunning then break end
 
@@ -507,6 +543,11 @@ _G.runDocksDeliveryFarm = function()
         while not turnInDone and turnInAttempts < 3 and _G.farmRunning do
             turnInAttempts += 1
             setStatus("Talking to turn in (attempt " .. turnInAttempts .. ")...")
+            -- Re-teleport right next to NPC and wait before firing
+            if npcHRP then
+                teleportTo(npcHRP.CFrame * CFrame.new(0, 0, -3))
+                waitSec(2.5)
+            end
             if prompt then firePrompt(prompt) end
 
             local gotGreeting2 = waitForTalk("jobs here", 6)
